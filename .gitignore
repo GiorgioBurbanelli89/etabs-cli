@@ -1,0 +1,14 @@
+__pycache__/
+*.pyc
+*.pyo
+*.exe
+*.dll
+*.EDB
+*.ico
+*.log
+*.csv
+*.json
+*.txt
+dist/
+build/
+*.spec
