@@ -5,6 +5,8 @@
 ```
 etabs-cli version modelo.EDB
 etabs-cli run modelo.EDB --results react,modal
+etabs-cli export modelo.EDB modelo.e2k --ver 22
+etabs-cli import modelo.e2k modelo.EDB --ver 22
 etabs-cli capture modelo.EDB --out cap1
 etabs-cli solve --dump cap1
 ```
@@ -69,6 +71,75 @@ etabs-cli convert modelo_v19.EDB modelo_v22.EDB --to 22
 # v22 -> v19 (downgrade via E2K)
 etabs-cli convert modelo_v22.EDB modelo_v19.EDB --to 19 --via-e2k
 ```
+
+### `export` — ETABS -> `.e2k` (texto)
+
+Saca el modelo a texto E2K sin abrir la interfaz. Es lo que en la GUI es
+`File > Export > ETABS .e2k Text File`.
+
+```bash
+etabs-cli export modelo.EDB modelo.e2k --ver 22
+```
+
+Salida:
+```json
+{
+  "model": "...\CHONE PROPUESTA.EDB",
+  "e2k":   "...\chone.e2k",
+  "via":   "ExportFile",
+  "bytes": 680150
+}
+```
+
+**Dos caminos, y el CLI elige solo** (`via` te dice cuál usó):
+
+| `via` | qué hace | cuándo |
+|---|---|---|
+| `ExportFile` | `File.Save(.EDB)` y luego `File.ExportFile(out, 1)` (`1 = eFileTypeIO_TextFile`, `2` = Excel) | ETABS 22 |
+| `$et` | copia el `.$et` que ETABS escribe **siempre** al guardar: es el mismo texto e2k, byte a byte | ETABS 19, cuya OAPI v1 revienta con `RPC_E_SERVERFAULT` al llamar `ExportFile` |
+
+**Por qué el `File.Save` va antes:** `ExportFile` escribe a partir del modelo
+*guardado*, no del que está en memoria. Sin ese Save devuelve ≠0 o sale vacío.
+
+**No toca tu modelo:** el CLI nunca guarda sobre el `.EDB` de origen — hacerlo
+con un motor más nuevo te lo convertiría de versión sin avisar. Si el destino
+choca con el origen, el `.EDB` de trabajo se va a un temporal.
+
+### `import` — `.e2k` -> ETABS (`.EDB`)
+
+```bash
+etabs-cli import modelo.e2k modelo.EDB --ver 22
+
+# importar y dejarlo ya resuelto
+etabs-cli import modelo.e2k modelo.EDB --ver 22 --run
+```
+
+**El detalle que hace falta saber:** `OpenFile` abre un `.e2k` igual que un
+`.EDB` — la OAPI no distingue. Pero el modelo queda *sin guardar*, y así el
+solver no corre: `RunAnalysis()` devuelve 1 y **todos los resultados salen en
+cero**. Por eso el CLI hace `File.Save(<.EDB>)` apenas detecta que abrió texto.
+Eso vale también para `run`, así que **`run` acepta un `.e2k` directo**:
+
+```bash
+etabs-cli run modelo.e2k --ver 22 --results react,modal
+```
+
+### Validación del round-trip (medido, ETABS 22)
+
+`edb/CHONE PROPUESTA.EDB` exportado a `.e2k` y vuelto a analizar, contra el
+`.EDB` original analizado directo:
+
+| | EDB original | .e2k exportado | dif |
+|---|---:|---:|---:|
+| T1 [s] | 0.579925 | 0.579916 | 9.0e-06 |
+| T2 [s] | 0.522720 | 0.522714 | 6.4e-06 |
+| T3 [s] | 0.520561 | 0.520529 | 3.2e-05 |
+| Fz Dead [kN] | 3510.1274 | 3510.1273 | 9.6e-05 |
+| Fz Live [kN] | 1057.1569 | 1057.1569 | 2.1e-05 |
+| Fz Super Dead [kN] | 1792.1653 | 1792.1653 | 6.5e-05 |
+
+La diferencia (1e-5) es el redondeo del texto: el `.e2k` escribe las
+coordenadas con menos cifras que el binario. El modelo no pierde nada.
 
 ### `run` — Correr analisis y extraer resultados
 
@@ -166,7 +237,7 @@ etabs-cli solve --dump dump_cap1 --rhs 5
 ```
 etabs-cli/
 ├── cli/                    # CLI principal
-│   ├── etabs_cli.py              # 5 subcommands: version, convert, run, capture, solve
+│   ├── etabs_cli.py              # 7 subcommands: version, convert, export, import, run, capture, solve
 │   ├── etabs_cli_standalone.py   # Todo inline (sin imports) → PyInstaller .exe
 │   └── etabs_cli_full.py         # Headless OAPI + Frida capture de K/F/U
 ├── frida/                  # Hooks Frida

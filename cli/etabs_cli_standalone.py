@@ -3,6 +3,8 @@ r"""etabs-cli (autonomo) — el CLI que ETABS no trae. Todo inline para empaquet
   etabs-cli version  modelo.EDB
   etabs-cli convert  v19.EDB out.EDB --to 22
   etabs-cli run      modelo.EDB --ver 19 --results react,modal --json out.json
+  etabs-cli export   modelo.EDB out.e2k --ver 22   # ETABS -> texto e2k
+  etabs-cli import   modelo.e2k out.EDB --ver 22   # e2k -> ETABS (.EDB)
   etabs-cli solve    --dump cap1 --rhs 5        # re-resuelve K capturada SIN ETABS
 """
 import argparse, json, os, sys, re, glob, tempfile, shutil
@@ -10,6 +12,10 @@ import argparse, json, os, sys, re, glob, tempfile, shutil
 EXE={"19":r"C:\Program Files\Computers and Structures\ETABS 19\ETABS.exe",
      "22":r"C:\Program Files\Computers and Structures\ETABS 22\ETABS.exe"}
 UNITS=6
+# Modelos de TEXTO de ETABS: OpenFile los abre igual que un .EDB, pero el modelo
+# queda "sin guardar" y el solver no corre hasta que exista el .EDB.
+TEXT_EXT=(".e2k",".$et")
+FT_TEXT=1          # File.ExportFile(path,tipo) -> eFileTypeIO: 1=TextFile, 2=Excel
 _FMT2FAM={"19.04":"19","23.01":"22"}
 
 # ---------- version (sin ETABS) ----------
@@ -23,7 +29,7 @@ def read_version(path, nbytes=512):
     return {"program":prog,"format":fmt,"program_version":pv,"family":fam,"raw":toks[:6],"path":path}
 
 # ---------- OAPI ----------
-def oapi_start(ver, model=None, hide=True):
+def oapi_start(ver, model=None, hide=True, edb_out=None):
     import comtypes.client as cc
     cc.CreateObject('ETABSv1.Helper'); from comtypes.gen import ETABSv1 as E
     h=cc.CreateObject('ETABSv1.Helper').QueryInterface(E.cHelper)
@@ -32,7 +38,13 @@ def oapi_start(ver, model=None, hide=True):
         try: et.Hide()
         except Exception: pass
     sm=et.SapModel
-    if model: sm.File.OpenFile(os.path.abspath(model))
+    if model:
+        p=os.path.abspath(model); sm.File.OpenFile(p)
+        if os.path.splitext(p)[1].lower() in TEXT_EXT:
+            # sin este Save, RunAnalysis() sobre un .e2k devuelve 1 y todo sale en cero
+            dst=os.path.abspath(edb_out) if edb_out else os.path.splitext(p)[0]+".EDB"
+            r=sm.File.Save(dst)
+            if r!=0: print("aviso: File.Save('%s') retorno %d"%(dst,r),file=sys.stderr)
     sm.SetPresentUnits(UNITS); return et,sm
 
 # ---------- convert ----------
@@ -50,6 +62,70 @@ def convert(src,out,target,via_e2k=False):
             et2,sm2=oapi_start(target,etx); sm2.File.Save(os.path.abspath(out)); et2.ApplicationExit(False)
         info["mode"]="downgrade_via_e2k"
     info["out_version"]=read_version(out)["program_version"]; return info
+
+# ---------- export / import e2k ----------
+def _export_text(sm, out, src):
+    """Deja el modelo abierto como texto e2k en `out`. Devuelve el dict de info.
+
+    Dos caminos, porque no todas las versiones sirven el primero:
+      1) File.ExportFile(out, 1)  -> ETABS 22 lo hace bien.
+         ETABS 19 revienta con RPC_E_SERVERFAULT: su OAPI v1 no lo expone.
+      2) Fallback universal: al hacer File.Save(x.EDB) ETABS escribe SIEMPRE un
+         `x.$et` al lado, que es el MISMO texto e2k (byte a byte). Se copia.
+    NUNCA se escribe sobre el .EDB de origen: guardarlo con un motor mas nuevo
+    lo convertiria de version a espaldas del usuario. Si hiciera falta, el .EDB
+    de trabajo va a un temporal.
+    """
+    out=os.path.abspath(out); src=os.path.abspath(src)
+    info={"model":src,"e2k":out}
+    edb=os.path.splitext(out)[0]+".EDB"
+    tmp=None
+    if os.path.normcase(edb)==os.path.normcase(src):
+        tmp=tempfile.mkdtemp(prefix="etabscli_")
+        edb=os.path.join(tmp,"work.EDB")
+    try:
+        r=sm.File.Save(edb)
+        if r!=0: print("aviso: File.Save('%s') retorno %d"%(edb,r), file=sys.stderr)
+        try: ret=sm.File.ExportFile(out, FT_TEXT)
+        except Exception as e: ret=-1; info["ExportFile_error"]=str(e)[:120]
+        if ret==0 and os.path.exists(out) and os.path.getsize(out)>0:
+            info["via"]="ExportFile"
+        else:
+            et_txt=os.path.splitext(edb)[0]+".$et"
+            if not os.path.exists(et_txt):
+                raise RuntimeError("ExportFile retorno %d y no hay '%s' de respaldo"%(ret,et_txt))
+            shutil.copyfile(et_txt, out); info["via"]="$et"
+        info["edb"]=None if tmp else edb
+        info["bytes"]=os.path.getsize(out)
+        return info
+    finally:
+        if tmp: shutil.rmtree(tmp, ignore_errors=True)
+
+def cmd_export(a):
+    """ETABS -> .e2k (texto). Ver _export_text: ExportFile, o el .$et del Save."""
+    et,sm=oapi_start(a.ver,a.model)
+    try: info=_export_text(sm,a.out,a.model)
+    finally:
+        try: et.ApplicationExit(False)
+        except Exception: pass
+    print(json.dumps(info,indent=2,ensure_ascii=False))
+
+def cmd_import(a):
+    """.e2k -> ETABS (.EDB). oapi_start ya hace el Save al ver que el modelo es texto."""
+    out=os.path.abspath(a.out)
+    et,sm=oapi_start(a.ver,a.model,edb_out=out); info={"e2k":a.model,"edb":out}
+    try:
+        if os.path.splitext(os.path.abspath(a.model))[1].lower() not in TEXT_EXT:
+            sm.File.Save(out)
+        if a.run:
+            try: sm.SetModelIsLocked(False)
+            except Exception: pass
+            info["analyze_ret"]=sm.Analyze.RunAnalysis(); sm.File.Save(out)
+    finally:
+        try: et.ApplicationExit(False)
+        except Exception: pass
+    info["bytes"]=os.path.getsize(out) if os.path.exists(out) else 0
+    print(json.dumps(info,indent=2,ensure_ascii=False))
 
 # ---------- run (incluye mesa: frames + shells via grupo "All") ----------
 G=9.80665
@@ -138,6 +214,9 @@ def main():
     c=sub.add_parser("convert"); c.add_argument("src"); c.add_argument("out"); c.add_argument("--to",required=True,choices=["19","22"]); c.add_argument("--via-e2k",action="store_true")
     c.set_defaults(fn=lambda a:print(json.dumps(convert(a.src,a.out,a.to,a.via_e2k),indent=2,ensure_ascii=False)))
     r=sub.add_parser("run"); r.add_argument("model"); r.add_argument("--ver",choices=["19","22"],default="19"); r.add_argument("--results",default="react,modal"); r.add_argument("--case"); r.add_argument("--json"); r.add_argument("--show",action="store_true"); r.set_defaults(fn=cmd_run)
+    e=sub.add_parser("export"); e.add_argument("model"); e.add_argument("out"); e.add_argument("--ver",choices=["19","22"],default="19"); e.set_defaults(fn=cmd_export)
+    i=sub.add_parser("import"); i.add_argument("model"); i.add_argument("out"); i.add_argument("--ver",choices=["19","22"],default="19")
+    i.add_argument("--run",action="store_true",help="correr el analisis y guardar el .EDB resuelto"); i.set_defaults(fn=cmd_import)
     so=sub.add_parser("solve"); so.add_argument("--dump",required=True); so.add_argument("--rhs",type=int,default=3); so.add_argument("--out"); so.set_defaults(fn=cmd_solve)
     a=ap.parse_args(); a.fn(a)
 
