@@ -111,9 +111,10 @@ def cmd_export(a):
     print(json.dumps(info,indent=2,ensure_ascii=False))
 
 def cmd_import(a):
-    """.e2k -> ETABS (.EDB). oapi_start ya hace el Save al ver que el modelo es texto."""
+    """.e2k -> ETABS (.EDB). El Save lo hace oapi_start al ver que el modelo es texto."""
     out=os.path.abspath(a.out)
-    et,sm=oapi_start(a.ver,a.model,edb_out=out); info={"e2k":a.model,"edb":out}
+    et, sm = oapi_start(a.ver, a.model, hide=not (a.show or a.keep), edb_out=out)
+    info={"e2k":a.model,"edb":out}
     try:
         if os.path.splitext(os.path.abspath(a.model))[1].lower() not in TEXT_EXT:
             sm.File.Save(out)
@@ -121,11 +122,16 @@ def cmd_import(a):
             try: sm.SetModelIsLocked(False)
             except Exception: pass
             info["analyze_ret"]=sm.Analyze.RunAnalysis(); sm.File.Save(out)
+        if a.keep:
+            try: et.Unhide()      # que la ventana quede a la vista para revisarlo
+            except Exception: pass
     finally:
-        try: et.ApplicationExit(False)
-        except Exception: pass
+        if not a.keep:
+            try: et.ApplicationExit(False)
+            except Exception: pass
     info["bytes"]=os.path.getsize(out) if os.path.exists(out) else 0
-    print(json.dumps(info,indent=2,ensure_ascii=False))
+    info["etabs"]="abierto (no lo cerre)" if a.keep else "cerrado"
+    print(json.dumps(info, indent=2, ensure_ascii=False))
 
 # ---------- run (incluye mesa: frames + shells via grupo "All") ----------
 G=9.80665
@@ -216,7 +222,9 @@ def main():
     r=sub.add_parser("run"); r.add_argument("model"); r.add_argument("--ver",choices=["19","22"],default="19"); r.add_argument("--results",default="react,modal"); r.add_argument("--case"); r.add_argument("--json"); r.add_argument("--show",action="store_true"); r.set_defaults(fn=cmd_run)
     e=sub.add_parser("export"); e.add_argument("model"); e.add_argument("out"); e.add_argument("--ver",choices=["19","22"],default="19"); e.set_defaults(fn=cmd_export)
     i=sub.add_parser("import"); i.add_argument("model"); i.add_argument("out"); i.add_argument("--ver",choices=["19","22"],default="19")
-    i.add_argument("--run",action="store_true",help="correr el analisis y guardar el .EDB resuelto"); i.set_defaults(fn=cmd_import)
+    i.add_argument("--run",action="store_true",help="correr el analisis y guardar el .EDB resuelto")
+    i.add_argument("--show",action="store_true",help="mostrar la ventana de ETABS")
+    i.add_argument("--keep",action="store_true",help="dejar ETABS abierto al terminar (implica --show)"); i.set_defaults(fn=cmd_import)
     so=sub.add_parser("solve"); so.add_argument("--dump",required=True); so.add_argument("--rhs",type=int,default=3); so.add_argument("--out"); so.set_defaults(fn=cmd_solve)
     a=ap.parse_args(); a.fn(a)
 

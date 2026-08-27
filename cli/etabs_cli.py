@@ -73,6 +73,26 @@ def cmd_run(a):
         if "modal" in want:
             r=sm.Results.ModalPeriod()
             out["modal"]=[{"mode":i+1,"T":r[4][i],"f":r[5][i]} for i in range(r[0])]
+        if "modalmass" in want:
+            # OAPI: (n, case[], stepType[], stepNum[], T[], UX,UY,UZ, SumUX,SumUY,SumUZ,
+            #        RX,RY,RZ, SumRX,SumRY,SumRZ, ret)
+            r=sm.Results.ModalParticipatingMassRatios(); n=r[0]
+            col=dict(zip(["T","UX","UY","UZ","SumUX","SumUY","SumUZ",
+                          "RX","RY","RZ","SumRX","SumRY","SumRZ"], r[4:17]))
+            out["modalmass"]=[dict([("mode",i+1)]+[(k,v[i]) for k,v in col.items()])
+                              for i in range(n)]
+        if "disp" in want:
+            # JointDispl(name, itemType): r[0]=n, r[1]=obj, r[3]=case,
+            # r[6..11] = U1 U2 U3 R1 R2 R3.  itemType 2 = grupo -> "All" = todos.
+            r=sm.Results.JointDispl("All", 2); n=r[0]
+            best={}
+            for i in range(n):
+                c=str(r[3][i]); b=best.setdefault(c, {})
+                for j,k in enumerate(["U1","U2","U3"]):
+                    v=r[6+j][i]
+                    if abs(v) > abs(b.get(k,(0,None))[0]): b[k]=(v, str(r[1][i]))
+            out["disp_max"]=[dict([("case",c)]+[(k,{"v":v,"joint":j}) for k,(v,j) in sorted(b.items())])
+                             for c,b in sorted(best.items())]
         if "react" in want:
             r=sm.Results.BaseReact()
             out["react"]=[{"case":r[1][i],"Fx":r[4][i],"Fy":r[5][i],"Fz":r[6][i],
@@ -130,22 +150,26 @@ def cmd_export(a):
     print(json.dumps(info, indent=2, ensure_ascii=False))
 
 def cmd_import(a):
-    """.e2k -> ETABS (.EDB). El Save lo hace _oapi al detectar que el modelo es texto."""
+    """.e2k -> ETABS (.EDB). El Save lo hace _oapi al ver que el modelo es texto."""
     out=os.path.abspath(a.out)
-    et, sm = _oapi(a.ver, a.model, edb_out=out)
+    et, sm = _oapi(a.ver, a.model, hide=not (a.show or a.keep), edb_out=out)
     info={"e2k":a.model,"edb":out}
     try:
         if os.path.splitext(os.path.abspath(a.model))[1].lower() not in TEXT_EXT:
-            sm.File.Save(out)                      # no era texto: igual lo dejamos donde pide
+            sm.File.Save(out)
         if a.run:
             try: sm.SetModelIsLocked(False)
             except Exception: pass
-            info["analyze_ret"]=sm.Analyze.RunAnalysis()
-            sm.File.Save(out)
+            info["analyze_ret"]=sm.Analyze.RunAnalysis(); sm.File.Save(out)
+        if a.keep:
+            try: et.Unhide()      # que la ventana quede a la vista para revisarlo
+            except Exception: pass
     finally:
-        try: et.ApplicationExit(False)
-        except Exception: pass
+        if not a.keep:
+            try: et.ApplicationExit(False)
+            except Exception: pass
     info["bytes"]=os.path.getsize(out) if os.path.exists(out) else 0
+    info["etabs"]="abierto (no lo cerre)" if a.keep else "cerrado"
     print(json.dumps(info, indent=2, ensure_ascii=False))
 
 def cmd_capture(a):
@@ -171,6 +195,8 @@ def main():
     i=sub.add_parser("import"); i.add_argument("model"); i.add_argument("out")
     i.add_argument("--ver",choices=["19","22"],default="19")
     i.add_argument("--run",action="store_true",help="correr el analisis y guardar el .EDB resuelto")
+    i.add_argument("--show",action="store_true",help="mostrar la ventana de ETABS")
+    i.add_argument("--keep",action="store_true",help="dejar ETABS abierto al terminar (implica --show)")
     i.set_defaults(fn=cmd_import)
     cap=sub.add_parser("capture"); cap.add_argument("model"); cap.add_argument("--ver",choices=["19","22"],default="19")
     cap.add_argument("--out",default="cap"); cap.set_defaults(fn=cmd_capture)
