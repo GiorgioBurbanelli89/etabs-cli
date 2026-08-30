@@ -324,3 +324,73 @@ Referencias: DMCA 1201(f) (EE.UU.), Decision 351 CAN (Ecuador/Colombia/Peru), Di
 ## Licencia
 
 MIT
+
+---
+
+## Lo que ETABS trae de fábrica (medido con `cli/defaults_csi.py`)
+
+```bash
+python cli/defaults_csi.py etabs      # o sin argumento: los tres motores
+```
+
+| ajuste | ETABS 22.6 | SAP2000 24.1 | SAFE 20 |
+|---|---|---|---|
+| **end length offset** | **auto** | manual (0,0,0) | auto |
+| **edge constraint** (área) | **True** | False | — |
+| releases | ninguno | ninguno | ninguno |
+| modificadores de barra | 8 × 1.0 | (vacío) | 8 × 1.0 |
+| insertion point | 10 (centroide) | 10 | 10 |
+| output stations | viga cada **0.5 m** · columna 3 | igual | igual |
+| materiales de serie | 4 | 2 | 4 |
+| patrones / casos | Dead, Live / + Modal | DEAD / + MODAL | Dead, Live |
+| diafragmas | D1 | no tiene | D1 |
+
+Y el detalle que descuadra pesos: el hormigón de serie es **imperial**,
+`4000Psi` a **23.563122 kN/m³** (150 lb/ft³). `SetMaterial` + `SetMPIsotropic`
+definen módulo y Poisson pero **no el peso**.
+
+⚠️ Y hay un **segundo hormigón**: ETABS crea `4000Psi` por su cuenta y es el que
+usa el **DECK**, porque `SetDeckFilled` reemplaza el material que le pasas en
+`SetDeck`. Hay que fijar el peso de **todos** los materiales de hormigón, y
+después de crear las áreas.
+
+## Cinco gotchas de la OAPI, todos medidos
+
+**1. ETABS OCULTO + un cuadro de diálogo = cuelgue eterno.** `obj.Hide()` y un
+aviso modal (`Error saving mesh information.`) dejan la llamada COM esperando
+para siempre — medido: Python con 1.1 s de CPU en media hora, sin error ni
+timeout. Arrancar visible, o dejar un cierra-diálogos que pulse Aceptar:
+`SendMessage(hBoton, BM_CLICK = 0x00F5)` sobre la ventana cuyo título es
+exactamente `ETABS`.
+
+**2. Un caso de carga que NO existe se pide igual que uno que sí.** Devuelve
+CERO resultados con todos los casos en OK:
+
+```
+estado: Modal=OK, Dead=OK, Live=OK, SDL=OK, Lroof=OK, ...
+Uz max = 0.00 mm    Suma Rz = 0.0 kN
+```
+
+Para una COMBINACIÓN es `SetComboSelectedForOutput`, no
+`SetCaseSelectedForOutput`.
+
+**3. `File.Save` antes de `RunAnalysis` + `ApplicationExit(False)` = `.EDB` sin
+resultados.** Los ficheros del solver (`.Y`, `.K_0`, `.OUT`) quedan en disco pero
+ETABS no los da por buenos al reabrir el modelo. Guardar DESPUÉS de analizar.
+
+**4. Los offsets automáticos no se leen con `GetEndLengthOffset`**: con
+`auto = True` devuelve 0 en las longitudes. Están en la tabla
+`Frame Assignments - End Length Offsets`, vía `DatabaseTables`. Su regla:
+
+```
+viga que llega a una COLUMNA  ->  medio ancho de la columna     0.075
+columna que llega a una VIGA  ->  el canto de la viga           0.25
+resto                         ->  0        (Rigid Factor = 0 en todas)
+```
+
+Con `rz = 0` el brazo **no rigidiza** — `Lf = L − rz·(offI+offJ)` da `Lf = L` —
+pero ETABS **no pesa** el tramo de VIGA que cae dentro (el de columna sí).
+
+**5. La masa manda sobre el peso.** `SetWeightAndMass` guarda la MASA y ETABS
+deriva el peso con **g = 9.80665**. Si le das la masa como `γ/9.81`, el peso
+efectivo sale 23.9918 en vez de 24.0.
